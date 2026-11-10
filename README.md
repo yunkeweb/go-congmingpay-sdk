@@ -52,7 +52,9 @@ log.Printf("result=%s status=%s", result.ResultCode, result.OrderStatus)
 
 ## 日志
 
-默认使用 `fmt.Printf` 输出请求、响应和错误。`client.WithLogHook(hook)` 返回一个使用自定义钩子的客户端副本；传入 `nil` 关闭日志。钩子同步调用，必须支持并发且不应阻塞。日志按字段名遮蔽签名、密钥、令牌、授权码、OpenID/UnionID、手机号及银行卡等敏感值，普通业务字段（如订单号、状态和金额）会保留。日志不包含回调验签。
+默认使用 `fmt.Printf` 输出请求、响应和错误，Payload 字段默认全部显示。使用者可通过 `Config.LogRedactFields` 指定需要遮蔽的字段名；匹配不区分大小写，并忽略字段名中的下划线和连字符，例如配置 `sub_openid` 会匹配 `subOpenid`。规则同样应用于嵌套对象和 JSON 字符串。非 JSON 内容原样记录。`client.WithLogHook(hook)` 返回一个使用自定义钩子的客户端副本；传入 `nil` 关闭日志。钩子同步调用，必须支持并发且不应阻塞。日志不包含回调验签。
+
+例如在创建客户端时设置 `LogRedactFields: []string{"sign", "sub_openid"}`，仅匹配这两个字段名及上述写法变体，将其值替换为 `[REDACTED]`；`unionid` 等未配置字段继续显示。配置 `token` 不会匹配 `access_token` 或 `token_count`，需要分别列出。未设置或设置为空列表时不脱敏。规则仅处理 JSON 字段，不匹配非 JSON 文本中的内容。
 
 ## 测试与发布
 

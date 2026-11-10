@@ -33,6 +33,7 @@ type Client struct {
 	programID, shopID, key string
 	httpClient             *http.Client
 	logHook                LogHook
+	logRedactFields        map[string]struct{}
 }
 
 // Config contains credentials for one merchant.
@@ -42,6 +43,10 @@ type Config struct {
 	ShopID     string
 	Key        string
 	HTTPClient *http.Client
+	// LogRedactFields contains payload field names whose values are replaced
+	// with [REDACTED] in logs. Matching ignores case, underscores, and hyphens.
+	// By default, no payload fields are redacted.
+	LogRedactFields []string
 }
 
 // NewClient constructs an immutable merchant client. Redirects are rejected.
@@ -59,7 +64,13 @@ func NewClient(config Config) (*Client, error) {
 	}
 	clientCopy := *hc
 	clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Client{baseURL: u, programID: config.ProgramID, shopID: config.ShopID, key: config.Key, httpClient: &clientCopy, logHook: defaultLogHook}, nil
+	redactFields := make(map[string]struct{}, len(config.LogRedactFields))
+	for _, field := range config.LogRedactFields {
+		if normalized := normalizeLogField(field); normalized != "" {
+			redactFields[normalized] = struct{}{}
+		}
+	}
+	return &Client{baseURL: u, programID: config.ProgramID, shopID: config.ShopID, key: config.Key, httpClient: &clientCopy, logHook: defaultLogHook, logRedactFields: redactFields}, nil
 }
 
 // Do sends a signed request to an /api/ endpoint. It copies params and never

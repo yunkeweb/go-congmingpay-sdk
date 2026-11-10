@@ -37,13 +37,13 @@ func TestLogging(t *testing.T) {
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte(`{"result_code":"FAIL","token":"response-secret"}`))
 		case "/api/invalid":
-			_, _ = w.Write([]byte("response-secret"))
+			_, _ = w.Write([]byte("{invalid payload"))
 		default:
 			_, _ = w.Write([]byte(`{"result_code":"success","order_id":"order-123","order_status":"paid","amount":12.5,"note":"paid order","nested":{"token":"response-secret","shop_name":"Example Shop"},"data":"{\"token\":\"response-secret\",\"order_id\":\"order-embedded\"}"}`))
 		}
 	}))
 	defer srv.Close()
-	client, err := NewClient(Config{BaseURL: srv.URL, ProgramID: "app-id", ShopID: "shop", Key: "key-secret", HTTPClient: srv.Client()})
+	client, err := NewClient(Config{BaseURL: srv.URL, ProgramID: "app-id", ShopID: "shop", Key: "key-secret", HTTPClient: srv.Client(), LogRedactFields: []string{"sign", "auth-code", "token"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestLogging(t *testing.T) {
 			t.Fatalf("leaked %q: %s", secret, b)
 		}
 	}
-	for _, expected := range []string{"success", "order-123", "order-embedded", "paid", "12.5", "paid order", "Example Shop", "app-id", "shop", "[REDACTED]", "[invalid JSON redacted]"} {
+	for _, expected := range []string{"success", "order-123", "order-embedded", "paid", "12.5", "paid order", "Example Shop", "app-id", "shop", "[REDACTED]", "{invalid payload"} {
 		if !strings.Contains(string(b), expected) {
 			t.Fatalf("missing %q: %s", expected, b)
 		}
@@ -99,7 +99,7 @@ func TestLogging(t *testing.T) {
 
 func TestLoggingTransportError(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	client, err := NewClient(Config{BaseURL: srv.URL, ProgramID: "app", ShopID: "shop", Key: "key", HTTPClient: srv.Client()})
+	client, err := NewClient(Config{BaseURL: srv.URL, ProgramID: "app", ShopID: "shop", Key: "key", HTTPClient: srv.Client(), LogRedactFields: []string{"sign", "auth_code", "token"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,24 +147,63 @@ func TestDefaultAndDisabledLogHook(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := string(output)
-	for _, expected := range []string{`"event":"request"`, `"event":"response"`, `"status_code":200`, "[REDACTED]"} {
+	for _, expected := range []string{`"event":"request"`, `"event":"response"`, `"status_code":200`} {
 		if !strings.Contains(result, expected) {
 			t.Fatalf("missing %q: %s", expected, result)
 		}
 	}
-	for _, expected := range []string{"order-default", "paid", "success"} {
+	for _, expected := range []string{"order-default", "paid", "success", "request-secret", "response-secret"} {
 		if !strings.Contains(result, expected) {
 			t.Fatalf("missing ordinary value %q: %s", expected, result)
 		}
 	}
-	for _, secret := range []string{"request-secret", "response-secret", "/api/disabled"} {
-		if strings.Contains(result, secret) {
-			t.Fatalf("unexpected %q: %s", secret, result)
+	if strings.Contains(result, "/api/disabled") || strings.Contains(result, "[REDACTED]") {
+		t.Fatalf("unexpected disabled log or default redaction: %s", result)
+	}
+}
+
+func TestLogFieldMatching(t *testing.T) {
+	fields := []string{"sub_openid", "token", "商户密钥", "", "_-"}
+	client, err := NewClient(Config{BaseURL: "https://example.com", ProgramID: "app", ShopID: "shop", Key: "key", LogRedactFields: fields})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Configuration is copied when constructing the client.
+	fields[0] = "order_id"
+	logger := &testLogger{}
+	client = client.WithLogHook(logger.hook)
+	client.logPayload(context.Background(), "response", "/api/query.do", 200, []byte(`{"subOpenId":"a","SUB-OPENID":"b","token":"c","access_token":"d","token_count":2,"order_id":"order","sub.openid":"e","商户密钥":"f","商户编号":"shop","":"empty"}`))
+	payload := logger.snapshot()[0].Payload.(map[string]any)
+	for _, key := range []string{"subOpenId", "SUB-OPENID", "token", "商户密钥"} {
+		if payload[key] != "[REDACTED]" {
+			t.Fatalf("configured field %q not redacted: %#v", key, payload)
+		}
+	}
+	for key, want := range map[string]any{"access_token": "d", "token_count": json.Number("2"), "order_id": "order", "sub.openid": "e", "商户编号": "shop", "": "empty"} {
+		if payload[key] != want {
+			t.Fatalf("unconfigured field %q modified: got %v, want %v", key, payload[key], want)
 		}
 	}
 }
 
-func TestLogSensitiveFields(t *testing.T) {
+func TestLogDefaultPayloadValues(t *testing.T) {
+	for _, fields := range [][]string{nil, {}} {
+		client, err := NewClient(Config{BaseURL: "https://example.com", ProgramID: "app", ShopID: "shop", Key: "key", LogRedactFields: fields})
+		if err != nil {
+			t.Fatal(err)
+		}
+		logger := &testLogger{}
+		client = client.WithLogHook(logger.hook)
+		client.logPayload(context.Background(), "response", "/api/query.do", 200, []byte(`{"sign":"signature","sub_openid":"openid","unionid":"union","token":"token","order_id":202611102033483123,"money":12.30,"data":"{ \"sign\": \"nested-sign\" }"}`))
+		payload := logger.snapshot()[0].Payload.(map[string]any)
+		want := map[string]any{"sign": "signature", "sub_openid": "openid", "unionid": "union", "token": "token", "order_id": json.Number("202611102033483123"), "money": json.Number("12.30"), "data": `{ "sign": "nested-sign" }`}
+		if !reflect.DeepEqual(payload, want) {
+			t.Fatalf("default logging changed values: got %#v, want %#v", payload, want)
+		}
+	}
+}
+
+func TestConfiguredLogRedactionFields(t *testing.T) {
 	fields := []string{
 		"key", "api_key", "privateKey", "secret_key", "short_key", "appSecret", "client_secret",
 		"sign", "SIGN", "signature", "paySign", "password", "passwd",
@@ -175,8 +214,9 @@ func TestLogSensitiveFields(t *testing.T) {
 	}
 	for _, field := range fields {
 		t.Run(field, func(t *testing.T) {
+			configured := map[string]struct{}{normalizeLogField(field): {}}
 			for _, value := range []any{"sensitive", json.Number("123456"), map[string]any{"value": "sensitive"}, []any{"sensitive"}} {
-				if got := redactLogValue(value, field); got != "[REDACTED]" {
+				if got := redactLogValue(value, field, configured); got != "[REDACTED]" {
 					t.Fatalf("sensitive field %q not redacted: %v", field, got)
 				}
 			}
@@ -201,7 +241,8 @@ func TestLogBusinessFieldsAndNestedValues(t *testing.T) {
 		"items": []any{map[string]any{"order_id": "child", "accessToken": "[REDACTED]"}, "ordinary", false, nil},
 		"sign":  "[REDACTED]",
 	}
-	got := redactLogValue(input, "")
+	fields := map[string]struct{}{"sign": {}, "accesstoken": {}}
+	got := redactLogValue(input, "", fields)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected log values: got %#v, want %#v", got, want)
 	}
@@ -212,7 +253,7 @@ func TestLogBusinessFieldsAndNestedValues(t *testing.T) {
 
 func TestLogJSONStringsAndNumberPrecision(t *testing.T) {
 	logger := &testLogger{}
-	client := &Client{logHook: logger.hook}
+	client := &Client{logHook: logger.hook, logRedactFields: map[string]struct{}{"accesstoken": {}, "openid": {}}}
 	body := []byte(`{"order_id":202611102033483123,"money":12.30,"data":"{\"access_token\":\"nested-secret\",\"money\":12.30,\"order_id\":202611102033483123}","items":"[{\"openid\":\"nested-secret\",\"order_id\":\"child\"}]","description":"unchanged","invalid":"{invalid json}"}`)
 	client.logPayload(context.Background(), "response", "/api/query.do", 200, body)
 	payload := logger.snapshot()[0].Payload.(map[string]any)

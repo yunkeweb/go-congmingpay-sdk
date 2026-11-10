@@ -8,7 +8,8 @@ import (
 	"strings"
 )
 
-// LogEvent contains a sanitized request, response, or transport failure.
+// LogEvent contains a request, response, or transport failure. Payload values
+// are redacted only when their field names are configured in Config.
 type LogEvent struct {
 	Event      string `json:"event"`
 	Path       string `json:"path"`
@@ -17,7 +18,7 @@ type LogEvent struct {
 	Error      string `json:"error,omitempty"`
 }
 
-// LogHook receives sanitized events synchronously. It must be safe for concurrent
+// LogHook receives log events synchronously. It must be safe for concurrent
 // calls and should not block request processing.
 type LogHook func(ctx context.Context, event LogEvent)
 
@@ -49,9 +50,9 @@ func (c *Client) logPayload(ctx context.Context, event, path string, status int,
 	decoder.UseNumber()
 	var extra any
 	if decoder.Decode(&value) != nil || decoder.Decode(&extra) != io.EOF {
-		value = "[invalid JSON redacted]"
+		value = string(body)
 	} else {
-		value = redactLogValue(value, "")
+		value = redactLogValue(value, "", c.logRedactFields)
 	}
 	c.logHook(ctx, LogEvent{Event: event, Path: path, StatusCode: status, Payload: value})
 }
@@ -62,8 +63,11 @@ func (c *Client) logFailure(ctx context.Context, path, message string) {
 	}
 }
 
-func redactLogValue(value any, key string) any {
-	if isSensitiveLogKey(key) {
+func redactLogValue(value any, key string, fields map[string]struct{}) any {
+	if len(fields) == 0 {
+		return value
+	}
+	if _, redact := fields[normalizeLogField(key)]; key != "" && redact {
 		return "[REDACTED]"
 	}
 
@@ -71,13 +75,13 @@ func redactLogValue(value any, key string) any {
 	case map[string]any:
 		result := make(map[string]any, len(v))
 		for k, item := range v {
-			result[k] = redactLogValue(item, k)
+			result[k] = redactLogValue(item, k, fields)
 		}
 		return result
 	case []any:
 		result := make([]any, len(v))
 		for i, item := range v {
-			result[i] = redactLogValue(item, "")
+			result[i] = redactLogValue(item, "", fields)
 		}
 		return result
 	case json.Number:
@@ -91,7 +95,7 @@ func redactLogValue(value any, key string) any {
 			if decoder.Decode(&decoded) == nil && (isJSONContainer(decoded)) {
 				var extra any
 				if decoder.Decode(&extra) == io.EOF {
-					if encoded, err := json.Marshal(redactLogValue(decoded, "")); err == nil {
+					if encoded, err := json.Marshal(redactLogValue(decoded, "", fields)); err == nil {
 						return string(encoded)
 					}
 				}
@@ -112,26 +116,12 @@ func isJSONContainer(value any) bool {
 	}
 }
 
-func isSensitiveLogKey(key string) bool {
+func normalizeLogField(key string) string {
 	var normalized strings.Builder
-	for _, r := range key {
-		if r >= 'a' && r <= 'z' {
-			normalized.WriteRune(r)
-		} else if r >= 'A' && r <= 'Z' {
-			normalized.WriteRune(r + ('a' - 'A'))
-		} else if r >= '0' && r <= '9' {
+	for _, r := range strings.ToLower(key) {
+		if r != '_' && r != '-' {
 			normalized.WriteRune(r)
 		}
 	}
-	name := normalized.String()
-	for _, sensitive := range []string{
-		"signature", "secret", "password", "passwd", "token", "authcode",
-		"openid", "unionid", "phonenumber", "mobilenumber", "phone", "mobile", "idcard", "cardno",
-		"cardnumber", "bankcard", "cvv", "cvc", "authorization", "credential",
-	} {
-		if name == sensitive || strings.HasSuffix(name, sensitive) {
-			return true
-		}
-	}
-	return name == "sign" || strings.HasSuffix(name, "paysign") || name == "code" || name == "key" || strings.HasSuffix(name, "apikey") || strings.HasSuffix(name, "privatekey") || strings.HasSuffix(name, "secretkey") || strings.HasSuffix(name, "shortkey")
+	return normalized.String()
 }
