@@ -29,32 +29,41 @@ func (r Response) String(key string) string { var s string; _ = json.Unmarshal(r
 
 // Client is safe for concurrent use provided its HTTP transport is safe for concurrent use.
 type Client struct {
-	baseURL        *url.URL
-	programID, key string
-	httpClient     *http.Client
-	logHook        LogHook
+	baseURL                *url.URL
+	programID, shopID, key string
+	httpClient             *http.Client
+	logHook                LogHook
 }
 
-// NewClient requires an HTTPS gateway origin, application ID and key. Supply a
-// custom HTTP client for timeouts or a custom transport; redirects are rejected.
-func NewClient(baseURL, programID, key string, hc *http.Client) (*Client, error) {
-	u, err := url.Parse(baseURL)
+// Config contains credentials for one merchant.
+type Config struct {
+	BaseURL    string
+	ProgramID  string
+	ShopID     string
+	Key        string
+	HTTPClient *http.Client
+}
+
+// NewClient constructs an immutable merchant client. Redirects are rejected.
+func NewClient(config Config) (*Client, error) {
+	u, err := url.Parse(config.BaseURL)
 	if err != nil || u == nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return nil, errors.New("congmingpay: base URL must be an HTTPS origin without path, credentials, query or fragment")
 	}
-	if programID == "" || key == "" {
-		return nil, errors.New("congmingpay: program ID and key are required")
+	if config.ProgramID == "" || config.ShopID == "" || config.Key == "" {
+		return nil, errors.New("congmingpay: program ID, shop ID and key are required")
 	}
+	hc := config.HTTPClient
 	if hc == nil {
 		hc = &http.Client{Timeout: 30 * time.Second}
 	}
 	clientCopy := *hc
 	clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Client{baseURL: u, programID: programID, key: key, httpClient: &clientCopy, logHook: defaultLogHook}, nil
+	return &Client{baseURL: u, programID: config.ProgramID, shopID: config.ShopID, key: config.Key, httpClient: &clientCopy, logHook: defaultLogHook}, nil
 }
 
-// Do send a signed request to an /api/ endpoint. It copies params and never
-// mutates the caller's map. program_id and sign are managed by the client.
+// Do sends a signed request to an /api/ endpoint. It copies params and never
+// mutates the caller's map. program_id, shop_id and sign are managed by the client.
 // API-level statuses, including processing, are left to the caller to interpret.
 func (c *Client) Do(ctx context.Context, path string, params Params) (Response, error) {
 	if c == nil {
@@ -66,21 +75,44 @@ func (c *Client) Do(ctx context.Context, path string, params Params) (Response, 
 	}
 	data := make(Params, len(params)+2)
 	for k, v := range params {
-		if k == "program_id" || k == "sign" {
+		if k == "program_id" || k == "shop_id" || k == "sign" {
 			return nil, fmt.Errorf("congmingpay: %s is managed by the client", k)
 		}
-		data[k] = v
+		if v != nil {
+			data[k] = v
+		}
 	}
 	data["program_id"] = c.programID
+	data["shop_id"] = c.shopID
+	// Freeze values once so custom marshalers cannot change signed values.
+	var frozen bytes.Buffer
+	enc := json.NewEncoder(&frozen)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(data); err != nil {
+		return nil, fmt.Errorf("congmingpay: encode request: %w", err)
+	}
+	var snapshot map[string]json.RawMessage
+	if err := json.Unmarshal(frozen.Bytes(), &snapshot); err != nil {
+		return nil, fmt.Errorf("congmingpay: decode request: %w", err)
+	}
+	data = make(Params, len(snapshot)+1)
+	for k, v := range snapshot {
+		if string(v) != "null" {
+			data[k] = v
+		}
+	}
 	sign, err := Sign(data, c.key)
 	if err != nil {
 		return nil, err
 	}
 	data["sign"] = sign
-	body, err := json.Marshal(data)
-	if err != nil {
+	var bodyBuffer bytes.Buffer
+	bodyEncoder := json.NewEncoder(&bodyBuffer)
+	bodyEncoder.SetEscapeHTML(false)
+	if err := bodyEncoder.Encode(data); err != nil {
 		return nil, fmt.Errorf("congmingpay: encode request: %w", err)
 	}
+	body := bytes.TrimSuffix(bodyBuffer.Bytes(), []byte("\n"))
 	target := *c.baseURL
 	target.Path = p.Path
 	target.RawPath = ""

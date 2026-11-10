@@ -10,25 +10,24 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"unicode/utf16"
 )
 
 // Sign computes the provider's uppercase MD5 signature over all provided
-// fields except sign. Empty values and nulls are included, as in the provider's
-// Java sample. Omit optional fields rather than setting them to empty values.
+// fields except sign. Top-level nulls are omitted, matching the PHP SDK.
 // Use json.Number for JSON numbers whose exact decimal representation matters.
 func Sign(params Params, key string) (string, error) {
 	if key == "" {
 		return "", errors.New("congmingpay: signing key is required")
 	}
-	b, err := json.Marshal(params)
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	err := encoder.Encode(params)
 	if err != nil {
 		return "", fmt.Errorf("congmingpay: encode signing fields: %w", err)
 	}
-	var m map[string]any
-	decoder := json.NewDecoder(bytes.NewReader(b))
-	decoder.UseNumber()
-	if err := decoder.Decode(&m); err != nil || m == nil {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(buf.Bytes(), &m); err != nil || m == nil {
 		return "", errors.New("congmingpay: signing fields must be a JSON object")
 	}
 	delete(m, "sign")
@@ -36,54 +35,24 @@ func Sign(params Params, key string) (string, error) {
 	for k := range m {
 		keys = append(keys, k)
 	}
-	// Java String.compareTo compares UTF-16 code units.
-	sort.Slice(keys, func(i, j int) bool { return javaLess(keys[i], keys[j]) })
+	sort.Strings(keys)
 	pairs := make([]string, 0, len(keys)+1)
 	for _, k := range keys {
-		value, err := signValue(m[k])
-		if err != nil {
-			return "", err
+		raw := bytes.TrimSpace(m[k])
+		if bytes.Equal(raw, []byte("null")) {
+			continue
+		}
+		value := string(raw)
+		if len(raw) > 0 && raw[0] == '"' {
+			if err := json.Unmarshal(raw, &value); err != nil {
+				return "", err
+			}
 		}
 		pairs = append(pairs, k+"="+value)
 	}
 	pairs = append(pairs, "key="+key)
 	sum := md5.Sum([]byte(strings.Join(pairs, "&")))
 	return strings.ToUpper(hex.EncodeToString(sum[:])), nil
-}
-
-func javaLess(a, b string) bool {
-	x, y := utf16.Encode([]rune(a)), utf16.Encode([]rune(b))
-	for i := 0; i < len(x) && i < len(y); i++ {
-		if x[i] != y[i] {
-			return x[i] < y[i]
-		}
-	}
-	return len(x) < len(y)
-}
-
-func signValue(v any) (string, error) {
-	switch x := v.(type) {
-	case string:
-		return x, nil
-	case json.Number:
-		return x.String(), nil
-	case nil:
-		return "null", nil
-	case bool:
-		if x {
-			return "true", nil
-		}
-		return "false", nil
-	default:
-		// The Java sample converts JSON arrays/objects via their JSON toString.
-		var b bytes.Buffer
-		enc := json.NewEncoder(&b)
-		enc.SetEscapeHTML(false)
-		if err := enc.Encode(v); err != nil {
-			return "", fmt.Errorf("congmingpay: encode nested signing value: %w", err)
-		}
-		return strings.TrimSuffix(b.String(), "\n"), nil
-	}
 }
 
 func equalSignature(expected, actual string) bool {

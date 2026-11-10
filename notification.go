@@ -2,11 +2,13 @@ package congmingpay
 
 import (
 	"bytes"
+	"crypto/md5" // Required by the provider's protocol.
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/url"
+	"strings"
 )
 
 // Notification contains decoded callback fields. Only the fields specified in
@@ -15,15 +17,57 @@ import (
 // the gateway before taking action; all other fields are untrusted.
 type Notification map[string]string
 
-// VerifyPaymentNotification verifies a legacy GET/form payment callback.
-// The provider signs money, orderId, result_code and shopId only. In particular,
-// do not use an unsigned order_id in place of the signed orderId.
+// Callback contains only authenticated fields as typed values. Raw includes
+// all callback fields; fields other than those listed below are unauthenticated.
+type Callback struct {
+	Money      string
+	OrderID    string
+	ResultCode string
+	ShopID     string
+	Raw        Notification
+}
+
+// ParsePaymentNotification verifies a payment form callback and returns its signed fields.
+func (c *Client) ParsePaymentNotification(values url.Values) (*Callback, error) {
+	n, err := c.VerifyPaymentNotification(values)
+	return paymentCallback(n, err)
+}
+
+// ParsePaymentNotificationJSON verifies a JSON payment callback. Confirm the
+// provider's new callback signing scheme before relying on it in production.
+func (c *Client) ParsePaymentNotificationJSON(body []byte) (*Callback, error) {
+	n, err := c.VerifyPaymentNotificationJSON(body)
+	return paymentCallback(n, err)
+}
+
+func paymentCallback(n Notification, err error) (*Callback, error) {
+	if err != nil {
+		return nil, err
+	}
+	orderID, ok := n["orderId"]
+	if !ok {
+		orderID = n["order_id"]
+	}
+	return &Callback{Money: n["money"], OrderID: orderID, ResultCode: n["result_code"], ShopID: n["shopId"], Raw: n}, nil
+}
+
+// ParseRefundNotification verifies a refund form callback and returns its signed fields.
+func (c *Client) ParseRefundNotification(values url.Values) (*Callback, error) {
+	n, err := c.VerifyRefundNotification(values)
+	if err != nil {
+		return nil, err
+	}
+	return &Callback{Money: n["money"], OrderID: n["order_id"], ResultCode: n["result_code"], ShopID: n["shop_id"], Raw: n}, nil
+}
+
+// VerifyPaymentNotification verifies a GET/form payment callback using the PHP
+// SDK's field selection. An order_id is never substituted when orderId exists.
 func (c *Client) VerifyPaymentNotification(values url.Values) (Notification, error) {
 	n, err := notificationFromValues(values)
 	if err != nil {
 		return nil, err
 	}
-	return c.verifyNotification(n, []string{"money", "orderId", "result_code", "shopId"})
+	return c.verifyPaymentNotification(n)
 }
 
 // VerifyRefundNotification verifies a GET/form refund callback. The provider
@@ -45,29 +89,51 @@ func (c *Client) VerifyPaymentNotificationJSON(body []byte) (Notification, error
 	if err != nil {
 		return nil, err
 	}
-	return c.verifyNotification(n, []string{"money", "orderId", "result_code", "shopId"})
+	return c.verifyPaymentNotification(n)
+}
+
+func (c *Client) verifyPaymentNotification(n Notification) (Notification, error) {
+	orderField := "orderId"
+	if _, ok := n[orderField]; !ok {
+		orderField = "order_id"
+	}
+	return c.verifyNotification(n, []string{"money", orderField, "result_code", "shopId"})
+}
+
+// VerifyCallback verifies explicitly ordered callback fields. Callers must know
+// the provider's signing rule for the specific callback; unsigned fields remain
+// untrusted. Missing and empty signed fields are rejected.
+func (c *Client) VerifyCallback(n Notification, names []string) (Notification, error) {
+	return c.verifyNotification(n, names)
 }
 
 func (c *Client) verifyNotification(n Notification, names []string) (Notification, error) {
 	if c == nil {
 		return nil, errors.New("congmingpay: nil client")
 	}
-	fields := make(Params, len(names))
+	if len(names) == 0 {
+		return nil, errors.New("congmingpay: signed callback fields are required")
+	}
+	pairs := make([]string, 0, len(names)+1)
+	seen := make(map[string]bool, len(names))
 	for _, name := range names {
+		if name == "sign" || seen[name] {
+			return nil, errors.New("congmingpay: invalid signed callback fields")
+		}
+		seen[name] = true
 		value, ok := n[name]
 		if !ok || value == "" {
 			return nil, fmt.Errorf("congmingpay: missing signed callback field %s", name)
 		}
-		fields[name] = value
+		pairs = append(pairs, name+"="+value)
 	}
 	actual, ok := n["sign"]
 	if !ok || actual == "" {
 		return nil, errors.New("congmingpay: missing callback signature")
 	}
-	expected, err := Sign(fields, c.key)
-	if err != nil {
-		return nil, err
-	}
+	pairs = append(pairs, "key="+c.key)
+	sum := md5.Sum([]byte(strings.Join(pairs, "&")))
+	expected := fmt.Sprintf("%X", sum)
 	if !equalSignature(expected, actual) {
 		return nil, errors.New("congmingpay: invalid callback signature")
 	}

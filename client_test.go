@@ -37,16 +37,16 @@ func TestRequestAndResponse(t *testing.T) {
 		_, _ = w.Write([]byte(`{"result_code":"success","order_status":"2"}`))
 	}))
 	defer srv.Close()
-	c, err := NewClient(srv.URL, "app", "secret", srv.Client())
+	c, err := NewClient(Config{BaseURL: srv.URL, ProgramID: "app", ShopID: "shop", Key: "secret", HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	params := Params{"shop_id": "shop", "order_id": "order"}
+	params := QueryOrderRequest{OrderID: "order"}
 	r, err := c.QueryOrder(context.Background(), params)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.String("result_code") != "success" || r.String("order_status") != "2" || len(params) != 2 {
+	if r.ResultCode != "success" || r.OrderStatus != "2" || params.OrderID != "order" {
 		t.Fatalf("unexpected response or mutation")
 	}
 	if _, err = c.Do(context.Background(), "/api/query.do", Params{"sign": "bad"}); err == nil {
@@ -65,11 +65,11 @@ func TestRedirectIsNotFollowed(t *testing.T) {
 		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
 	}))
 	defer srv.Close()
-	c, err := NewClient(srv.URL, "app", "secret", srv.Client())
+	c, err := NewClient(Config{BaseURL: srv.URL, ProgramID: "app", ShopID: "shop", Key: "secret", HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = c.QueryOrder(context.Background(), nil)
+	_, err = c.QueryOrder(context.Background(), QueryOrderRequest{OrderID: "order"})
 	var httpErr *HTTPError
 	if !errors.As(err, &httpErr) || httpErr.StatusCode != 307 || redirected {
 		t.Fatalf("unexpected redirect: %v", err)
@@ -77,7 +77,7 @@ func TestRedirectIsNotFollowed(t *testing.T) {
 }
 
 func TestNotifications(t *testing.T) {
-	c, err := NewClient("https://example.com", "app", "secret", nil)
+	c, err := NewClient(Config{BaseURL: "https://example.com", ProgramID: "app", ShopID: "shop", Key: "secret"})
 	if err != nil {
 		t.Fatal(err)
 	}

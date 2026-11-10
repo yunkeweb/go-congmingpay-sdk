@@ -42,7 +42,7 @@ func TestLogging(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	client, err := NewClient(srv.URL, "app-secret", "key-secret", srv.Client())
+	client, err := NewClient(Config{BaseURL: srv.URL, ProgramID: "app-secret", ShopID: "shop", Key: "key-secret", HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestLogging(t *testing.T) {
 
 func TestLoggingTransportError(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	client, err := NewClient(srv.URL, "app", "key", srv.Client())
+	client, err := NewClient(Config{BaseURL: srv.URL, ProgramID: "app", ShopID: "shop", Key: "key", HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestDefaultAndDisabledLogHook(t *testing.T) {
 		_, _ = w.Write([]byte(`{"result_code":"success","token":"response-secret"}`))
 	}))
 	defer srv.Close()
-	client, err := NewClient(srv.URL, "app", "key", srv.Client())
+	client, err := NewClient(Config{BaseURL: srv.URL, ProgramID: "app", ShopID: "shop", Key: "key", HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}

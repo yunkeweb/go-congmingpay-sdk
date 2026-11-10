@@ -1,6 +1,6 @@
 # go-congmingpay-sdk
 
-聪明付基础支付 API 的 Go SDK，基于《基础支付接口文档及说明》版本 3120。仅依赖 Go 标准库，要求 Go 1.22 或更高版本。
+聪明付基础支付 API 的 Go SDK，基于飞书文档 revision 3121 和 PHP SDK 的实现。仅依赖 Go 标准库，需要 Go 1.22 或更高版本。
 
 ## 安装
 
@@ -8,77 +8,53 @@
 go get github.com/yunkeweb/go-congmingpay-sdk
 ```
 
-## 使用
+## 客户端
 
-网关域名、应用 ID 和密钥由平台提供；商户须先完成授权。不要将密钥写入代码或提交到版本库。
+每个 Client 对应一组商户配置。可以同时创建多个 Client；不要把真实密钥提交到代码仓库。
 
 ```go
-package main
-
-import (
-	"context"
-	"log"
-	"os"
-	"time"
-
-	congmingpay "github.com/yunkeweb/go-congmingpay-sdk"
-)
-
-func main() {
-	client, err := congmingpay.NewClient(os.Getenv("CONGMINGPAY_BASE_URL"), os.Getenv("CONGMINGPAY_PROGRAM_ID"), os.Getenv("CONGMINGPAY_KEY"), nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	resp, err := client.QueryOrder(ctx, congmingpay.Params{
-		"shop_id":  os.Getenv("CONGMINGPAY_SHOP_ID"),
-		"order_id": "merchant-order-id",
-		"ver":      "3.0",
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("result=%s status=%s", resp.String("result_code"), resp.String("order_status"))
+client, err := congmingpay.NewClient(congmingpay.Config{
+    BaseURL:   os.Getenv("CONGMINGPAY_BASE_URL"),
+    ProgramID: os.Getenv("CONGMINGPAY_PROGRAM_ID"),
+    ShopID:    os.Getenv("CONGMINGPAY_SHOP_ID"),
+    Key:       os.Getenv("CONGMINGPAY_KEY"),
+})
+if err != nil {
+    return err
 }
+
+result, err := client.QueryOrder(ctx, congmingpay.QueryOrderRequest{
+    OrderID: "merchant-order-id",
+})
+if err != nil {
+    return err
+}
+log.Printf("result=%s status=%s", result.ResultCode, result.OrderStatus)
 ```
 
-请求参数与文档字段名保持一致，`program_id` 和 `sign` 自动添加。金额使用字符串，例如 `"12.35"`；文档要求 JSON 数值时使用
-`json.Number("12.35")`，避免浮点精度问题。可选参数不需要时应省略。请按各接口文档填写版本、回调地址及业务字段。`Response` 保留完整
-JSON 字段，可用 `json.Unmarshal(resp["field"], &value)` 解码。
+可通过 `Config.HTTPClient` 提供自定义 HTTP 客户端；默认超时 30 秒。SDK 要求 HTTPS，不跟随重定向，不自动重试。`program_id`、`shop_id` 和 `sign` 由客户端注入，不能在通用请求中覆盖。分账接收方字段不受此限制。Client 可并发使用，HTTP 客户端和日志钩子也必须支持并发。
 
-`error == nil` 仅表示 HTTP 和 JSON 处理成功，不表示支付成功。必须按对应接口检查 `result_code` 和订单、退款或分账状态；
-`processing` 表示处理中，不要将其视为失败或成功。请求超时也不表示交易未发生，先查询原订单，避免重复支付或退款。SDK 不自动重试。
+接口方法包括 `BuyPay`、`JSNativePay`、`MicroPay`、`PrePay`、`MiniAppPay`、`QueryOrder`、`Refund`、`QueryRefund`、`CancelOrder`、`ProfitOrder`、`ProfitOrderBack`、`SearchMerchantWXApp`、`SetMerchantWXApp`、`OpenIDByAuthCode`、`UserCancelOrder` 和 `UnionOpenID`。方法的请求结构体以方法名加 `Request` 命名。
 
-支持方法：`BuyPay`、`JSNativePay`、`MicroPay`、`PrePay`、`MiniAppPay`、`QueryOrder`、`Refund`、`QueryRefund`、`CancelOrder`、
-`ProfitOrder`、`ProfitOrderBack`、`SearchMerchantWXApp`、`SetMerchantWXApp`、`OpenIDByAuthCode`、`UserCancelOrder`、
-`UnionOpenID`。新接口可使用 `Do`；只允许 `/api/` 下的相对路径，网关必须使用 HTTPS，且不会跟随重定向。
+`BuyPayRequest`、`JSNativePayRequest`、`MicroPayRequest` 和 `MiniAppPayRequest` 通过嵌入的 `PaymentFields` 设置共同字段。金额通常使用字符串，单位和精度遵循对应接口；分账回退的 JSON 数值使用 `json.Number` 保留原始十进制表示。指定版本的接口自动填充 `3.0`；查询接口的可选 `Ver` 仅在显式指定时发送。支付接口的分账及回调格式默认值与 PHP SDK 一致，可通过请求字段覆盖。
 
-## 请求与响应日志
+每个类型化方法返回 `Result`。常用字段可直接读取，`Result.Raw` 保留完整 JSON 响应字段；使用 `json.Unmarshal(result.Raw["字段名"], &value)` 可解析其他字段。`error == nil` 只表示 HTTP 和 JSON 处理成功，不能说明交易成功；必须检查业务状态。请求超时不代表交易未发生，重试支付、退款前应先查询，避免重复操作。
 
-默认通过 `fmt.Printf` 将脱敏后的请求、响应及错误事件输出到标准输出。使用 `WithLogHook` 可替换为自己的日志处理函数，传入 `nil` 可关闭日志。该方法返回新的客户端，不改变原客户端。
+未封装接口可用 `Do(ctx, "/api/custom.do", congmingpay.Params{...})`，返回原始 `Response`。路径必须是 `/api/` 下的相对路径。参数中顶层 `nil` 不发送；涉及嵌套对象的签名需要与平台联调确认。若字段在文档中是 JSON 字符串，应传入字符串，而不是数组或对象。
 
-钩子在请求过程中同步调用，必须支持并发调用，并应避免阻塞请求。日志覆盖通过 `Do` 发起的请求、响应及传输失败，不包含回调验签；仅已知的 `result_code` 状态值保留明文，其余字段值（包括签名、标识、金额和嵌套字符串）均脱敏，无法解析的响应不会原样记录。字段名及请求路径会记录，请勿在字段名或路径中放入敏感信息。非 2xx 响应在开启日志后最多读取 4 MiB 用于记录，不改变返回的 HTTP 错误。
+## 回调和签名
 
-## 签名和回调安全
+请求签名参考 PHP SDK：排除 `sign` 和顶层 null，按字段名排序后拼接并使用大写 MD5。对于嵌套对象，签名与发送的 JSON 字节保持一致；跨语言的对象字段顺序、数字格式等仍需通过平台样例核对。
 
-请求采用文档规定的排序参数和 MD5 签名。`Sign` 包含已提供的空值和 null，不包含 `sign`。嵌套数组/对象按紧凑 JSON
-序列化；提供商未提供复杂对象的签名测试向量，使用分账明细等嵌套结构前须与平台联调确认。响应签名规则和无签名错误响应的处理在文档中不完整，SDK
-**不自动验证响应签名**；不可仅凭响应内容确认资金状态，须与平台确认验证规则并进行对账。
+`ParsePaymentNotification` 和 `ParseRefundNotification` 接收 `url.Values`；`ParsePaymentNotificationJSON` 接收 JSON 原文。它们返回的 `Callback` 中 `Money`、`OrderID`、`ResultCode`、`ShopID` 是参与验签的字段，`Raw` 中其他字段并未经过认证。支付回调优先验证 `orderId`，不存在时按 PHP 实现验证 `order_id`；退款回调使用 `shop_id`。实际新回调格式须与平台确认并联调。解析 JSON 前调用方应限制请求体大小。
 
-旧支付回调可使用 `VerifyPaymentNotification(r.URL.Query())`，退款回调使用 `VerifyRefundNotification(r.URL.Query())`
-。旧支付回调仅验证 `money`、`orderId`、`result_code`、`shopId`；退款回调仅验证 `money`、`order_id`、`result_code`、`shop_id`
-。其他字段均未经认证，包括旧支付回调中名为 `order_id` 的字段。验签后仍须核对自己的商户、订单号、金额和状态，并主动查询支付平台确认；实现幂等处理。旧支付回调处理完成后返回文档指定的
-`success` 字符串。
+验签后仍要核对商户、订单、金额和状态，并进行幂等处理及必要的订单查询。响应签名和分账回退回调的签名规则尚不明确，SDK 不声称已验证。退款回调响应格式也须与平台确认。
 
-`VerifyPaymentNotificationJSON` 按文档第 2-23 节的四字段示例验证新 JSON
-回调，但文档没有明确新回调是否采用完全相同的签名规则，上线前必须与平台确认并用真实测试回调验证。分账回退回调验签规则未明确，SDK
-不提供该回调的自动验签。回调 JSON 请求体应在读取前限制大小。MD5 是平台协议要求，不能为未签名字段提供完整性保护。
+## 日志
 
-文档中退款回调返回格式与旧支付回调不同，接入时请与平台确认；SDK 不自动生成退款回调响应。交易及分账对账单为平台配置的文件下载流程，本文档未提供可调用的
-API，因此 SDK 未封装下载功能。
+默认使用 `fmt.Printf` 输出脱敏的请求、响应和错误。`client.WithLogHook(hook)` 返回一个使用自定义钩子的客户端副本；传入 `nil` 关闭日志。钩子同步调用，必须支持并发且不应阻塞。默认日志保留字段名、路径和已知业务状态，其余值均脱敏。日志不包含回调验签。
 
-## 测试
+## 测试与发布
 
 ```sh
 go test ./...
@@ -86,6 +62,4 @@ go test -race ./...
 go vet ./...
 ```
 
-## CI 和发布
-
-GitHub Actions 在分支推送和 Pull Request 时检查 Go 格式、`go vet`、测试及构建，并在 Linux 上执行竞态检测；同时覆盖 Go 1.22、当前稳定版和 Windows。在 GitHub Actions 中从 `main` 手动运行工作流并填写版本号（例如 `v0.1.0`），检查通过后会创建并推送标签、创建 GitHub Release，并请求 Go 官方模块代理收录。也可以自行推送版本标签触发发布；带 `-rc.1` 后缀的版本创建预发布。当前模块路径支持 `v0` 和 `v1`，发布 `v2` 需要调整模块路径。已发布的标签不应修改。留空版本号仅运行检查。
+GitHub Actions 执行格式、测试和构建检查，并支持通过版本标签创建 Release。已发布的标签不应修改。当前模块路径支持 v0 和 v1；发布 v2 需要调整模块路径。本次配置和类型化 API 是不兼容变更，升级时需调整调用代码。
