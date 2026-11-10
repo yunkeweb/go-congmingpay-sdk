@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"strings"
 )
 
 // LogEvent contains a sanitized request, response, or transport failure.
@@ -43,7 +45,10 @@ func (c *Client) logPayload(ctx context.Context, event, path string, status int,
 		return
 	}
 	var value any
-	if json.Unmarshal(body, &value) != nil {
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.UseNumber()
+	var extra any
+	if decoder.Decode(&value) != nil || decoder.Decode(&extra) != io.EOF {
 		value = "[invalid JSON redacted]"
 	} else {
 		value = redactLogValue(value, "")
@@ -58,6 +63,10 @@ func (c *Client) logFailure(ctx context.Context, path, message string) {
 }
 
 func redactLogValue(value any, key string) any {
+	if isSensitiveLogKey(key) {
+		return "[REDACTED]"
+	}
+
 	switch v := value.(type) {
 	case map[string]any:
 		result := make(map[string]any, len(v))
@@ -71,10 +80,58 @@ func redactLogValue(value any, key string) any {
 			result[i] = redactLogValue(item, "")
 		}
 		return result
+	case json.Number:
+		return v
 	case string:
-		if key == "result_code" && (v == "success" || v == "SUCCESS" || v == "fail" || v == "FAIL" || v == "processing" || v == "PROCESSING") {
-			return v
+		trimmed := strings.TrimSpace(v)
+		if len(trimmed) > 1 && (trimmed[0] == '{' || trimmed[0] == '[') {
+			var decoded any
+			decoder := json.NewDecoder(strings.NewReader(trimmed))
+			decoder.UseNumber()
+			if decoder.Decode(&decoded) == nil && (isJSONContainer(decoded)) {
+				var extra any
+				if decoder.Decode(&extra) == io.EOF {
+					if encoded, err := json.Marshal(redactLogValue(decoded, "")); err == nil {
+						return string(encoded)
+					}
+				}
+			}
+		}
+		return v
+	default:
+		return value
+	}
+}
+
+func isJSONContainer(value any) bool {
+	switch value.(type) {
+	case map[string]any, []any:
+		return true
+	default:
+		return false
+	}
+}
+
+func isSensitiveLogKey(key string) bool {
+	var normalized strings.Builder
+	for _, r := range key {
+		if r >= 'a' && r <= 'z' {
+			normalized.WriteRune(r)
+		} else if r >= 'A' && r <= 'Z' {
+			normalized.WriteRune(r + ('a' - 'A'))
+		} else if r >= '0' && r <= '9' {
+			normalized.WriteRune(r)
 		}
 	}
-	return "[REDACTED]"
+	name := normalized.String()
+	for _, sensitive := range []string{
+		"signature", "secret", "password", "passwd", "token", "authcode",
+		"openid", "unionid", "phonenumber", "mobilenumber", "phone", "mobile", "idcard", "cardno",
+		"cardnumber", "bankcard", "cvv", "cvc", "authorization", "credential",
+	} {
+		if name == sensitive || strings.HasSuffix(name, sensitive) {
+			return true
+		}
+	}
+	return name == "sign" || strings.HasSuffix(name, "paysign") || name == "code" || name == "key" || strings.HasSuffix(name, "apikey") || strings.HasSuffix(name, "privatekey") || strings.HasSuffix(name, "secretkey") || strings.HasSuffix(name, "shortkey")
 }

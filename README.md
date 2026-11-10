@@ -52,7 +52,7 @@ log.Printf("result=%s status=%s", result.ResultCode, result.OrderStatus)
 
 ## 日志
 
-默认使用 `fmt.Printf` 输出脱敏的请求、响应和错误。`client.WithLogHook(hook)` 返回一个使用自定义钩子的客户端副本；传入 `nil` 关闭日志。钩子同步调用，必须支持并发且不应阻塞。默认日志保留字段名、路径和已知业务状态，其余值均脱敏。日志不包含回调验签。
+默认使用 `fmt.Printf` 输出请求、响应和错误。`client.WithLogHook(hook)` 返回一个使用自定义钩子的客户端副本；传入 `nil` 关闭日志。钩子同步调用，必须支持并发且不应阻塞。日志按字段名遮蔽签名、密钥、令牌、授权码、OpenID/UnionID、手机号及银行卡等敏感值，普通业务字段（如订单号、状态和金额）会保留。日志不包含回调验签。
 
 ## 测试与发布
 
