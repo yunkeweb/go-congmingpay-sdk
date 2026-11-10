@@ -32,6 +32,7 @@ type Client struct {
 	baseURL        *url.URL
 	programID, key string
 	httpClient     *http.Client
+	logHook        LogHook
 }
 
 // NewClient requires an HTTPS gateway origin, application ID and key. Supply a
@@ -49,10 +50,10 @@ func NewClient(baseURL, programID, key string, hc *http.Client) (*Client, error)
 	}
 	clientCopy := *hc
 	clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Client{baseURL: u, programID: programID, key: key, httpClient: &clientCopy}, nil
+	return &Client{baseURL: u, programID: programID, key: key, httpClient: &clientCopy, logHook: defaultLogHook}, nil
 }
 
-// Do sends a signed request to an /api/ endpoint. It copies params and never
+// Do send a signed request to an /api/ endpoint. It copies params and never
 // mutates the caller's map. program_id and sign are managed by the client.
 // API-level statuses, including processing, are left to the caller to interpret.
 func (c *Client) Do(ctx context.Context, path string, params Params) (Response, error) {
@@ -89,21 +90,34 @@ func (c *Client) Do(ctx context.Context, path string, params Params) (Response, 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	c.logPayload(ctx, "request", p.Path, 0, body)
 	res, err := c.httpClient.Do(req)
 	if err != nil {
+		c.logFailure(ctx, p.Path, "request failed")
 		return nil, fmt.Errorf("congmingpay: request failed: %w", err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		if c.logHook != nil {
+			b, readErr := io.ReadAll(io.LimitReader(res.Body, maxResponseSize+1))
+			if readErr == nil && len(b) <= maxResponseSize {
+				c.logPayload(ctx, "response", p.Path, res.StatusCode, b)
+			} else {
+				c.logFailure(ctx, p.Path, "read HTTP error response failed or too large")
+			}
+		}
 		return nil, &HTTPError{StatusCode: res.StatusCode}
 	}
 	b, err := io.ReadAll(io.LimitReader(res.Body, maxResponseSize+1))
 	if err != nil {
+		c.logFailure(ctx, p.Path, "read response failed")
 		return nil, fmt.Errorf("congmingpay: read response: %w", err)
 	}
 	if len(b) > maxResponseSize {
+		c.logFailure(ctx, p.Path, "response too large")
 		return nil, errors.New("congmingpay: response exceeds 4 MiB")
 	}
+	c.logPayload(ctx, "response", p.Path, res.StatusCode, b)
 	var result Response
 	if err := json.Unmarshal(b, &result); err != nil || result == nil {
 		return nil, errors.New("congmingpay: response is not a JSON object")

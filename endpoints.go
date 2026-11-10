@@ -5,6 +5,7 @@ import "context"
 // The following methods correspond to sections 2-1 through 2-18 of the API
 // document. Fields are intentionally supplied as Params so optional and newly
 // introduced gateway fields can be passed without losing their exact values.
+
 func (c *Client) BuyPay(ctx context.Context, p Params) (Response, error) {
 	return c.Do(ctx, "/api/buyPay.do", p)
 }

@@ -1,0 +1,132 @@
+name: CI and Release
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. v0.1.0); leave empty to run checks only"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Go ${{ matrix.go }} / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            go: '1.22'
+          - os: ubuntu-latest
+            go: stable
+          - os: windows-latest
+            go: stable
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false
+      - name: Check formatting
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            printf 'Go files need gofmt:\n%s\n' "$unformatted"
+            exit 1
+          fi
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./... -count=1
+      - name: Race test
+        if: matrix.os == 'ubuntu-latest' && matrix.go == 'stable'
+        run: go test -race ./... -count=1
+      - name: Build
+        run: go build ./...
+
+  release:
+    name: Publish GitHub Release
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.version != '')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - name: Validate version tag
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[01]\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo 'Expected a v0 or v1 version tag such as v0.1.0 or v1.2.3-rc.1.'
+            exit 1
+          fi
+          if [[ "$TAG" == *-* ]]; then
+            prerelease=${TAG#*-}
+            IFS=. read -ra parts <<< "$prerelease"
+            for part in "${parts[@]}"; do
+              if [[ "$part" =~ ^0[0-9]+$ ]]; then
+                echo "Numeric prerelease identifiers cannot have leading zeros."
+                exit 1
+              fi
+            done
+          fi
+      - name: Create version tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ inputs.version }}
+        run: |
+          existing=$(git ls-remote --refs origin "refs/tags/$TAG" | cut -f1)
+          if [ -n "$existing" ]; then
+            if [ "$existing" != "$GITHUB_SHA" ]; then
+              echo "Tag $TAG already points to a different commit; refusing to overwrite it."
+              exit 1
+            fi
+            echo "Tag $TAG already exists on this commit; continuing."
+          else
+            git tag "$TAG" "$GITHUB_SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+        run: |
+          args=(--verify-tag --generate-notes --title "$TAG")
+          if [[ "$TAG" == *-* ]]; then
+            args+=(--prerelease)
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; continuing."
+          else
+            gh release create "$TAG" "${args[@]}"
+          fi
+      - name: Request Go module proxy
+        env:
+          GOPROXY: https://proxy.golang.org
+          GOWORK: 'off'
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+        run: |
+          cd "$RUNNER_TEMP"
+          for attempt in 1 2 3 4 5; do
+            if go list -m "github.com/yunkeweb/go-congmingpay-sdk@$TAG"; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo 'Go module proxy request failed; retry the version lookup later.'
+          exit 1
