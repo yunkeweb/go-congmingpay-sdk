@@ -17,16 +17,6 @@ import (
 
 const maxResponseSize = 4 << 20
 
-// Params contains API field names and values exactly as specified by the gateway.
-type Params map[string]any
-
-// Response preserves all response fields, including newly added fields and their
-// original JSON representation. A nil error does not imply result_code=success.
-type Response map[string]json.RawMessage
-
-// String returns a string field, or an empty string if it is absent or not a string.
-func (r Response) String(key string) string { var s string; _ = json.Unmarshal(r[key], &s); return s }
-
 // Client is safe for concurrent use provided its HTTP transport is safe for concurrent use.
 type Client struct {
 	baseURL                *url.URL

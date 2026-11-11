@@ -56,6 +56,26 @@ log.Printf("result=%s status=%s", result.ResultCode, result.OrderStatus)
 
 例如在创建客户端时设置 `LogRedactFields: []string{"sign", "sub_openid"}`，仅匹配这两个字段名及上述写法变体，将其值替换为 `[REDACTED]`；`unionid` 等未配置字段继续显示。配置 `token` 不会匹配 `access_token` 或 `token_count`，需要分别列出。未设置或设置为空列表时不脱敏。规则仅处理 JSON 字段，不匹配非 JSON 文本中的内容。
 
+## 项目结构
+
+SDK 保持单一 `congmingpay` 包，按职责拆分文件。业务文件中将请求结构体与对应接口方法放在一起，使用者继续通过模块根路径导入。
+
+| 文件 | 职责 |
+| --- | --- |
+| `client.go` | 商户配置、客户端创建、HTTP 请求与错误处理 |
+| `request.go` | 通用参数、请求转换、默认值与参数校验 |
+| `response.go` | 原始响应、通用结果与字段解析 |
+| `payment.go` | 各类支付接口及其请求结构体 |
+| `order.go` | 订单查询、撤销与取消 |
+| `refund.go` | 退款与退款查询 |
+| `profit.go` | 分账与分账回退 |
+| `merchant.go` | 商户微信应用配置与查询 |
+| `openid.go` | OpenID 获取 |
+| `notification.go`、`sign.go` | 回调解析、验签与请求签名 |
+| `logging.go` | 日志钩子与可配置脱敏 |
+
+测试按客户端、请求、签名、回调与日志职责放在对应的 `*_test.go` 文件中；GitHub Actions 工作流放在 `.github/workflows/`。
+
 ## 测试与发布
 
 ```sh
