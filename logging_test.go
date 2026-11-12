@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"reflect"
 	"strings"
@@ -271,5 +272,81 @@ func TestLogJSONStringsAndNumberPrecision(t *testing.T) {
 	}
 	if !strings.Contains(payload["data"].(string), "202611102033483123") || !strings.Contains(payload["data"].(string), "12.30") {
 		t.Fatalf("embedded numeric values lost precision: %v", payload["data"])
+	}
+}
+
+func TestLogURLQueryRedaction(t *testing.T) {
+	link := "https://pay.example/checkout?order_id=order%2f123&Pro-Access_Token=secret-one&pro%5Faccess_token=secret-two&pro_access_token&access_token=keep+value#unchanged"
+	want := "https://pay.example/checkout?order_id=order%2f123&Pro-Access_Token=%5BREDACTED%5D&pro%5Faccess_token=%5BREDACTED%5D&pro_access_token=%5BREDACTED%5D&access_token=keep+value#unchanged"
+	fields := map[string]struct{}{"proaccesstoken": {}}
+	if got := redactLogValue(link, "url", fields); got != want {
+		t.Fatalf("unexpected redacted URL: %v", got)
+	}
+	parsed, err := url.Parse(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Query().Get("Pro-Access_Token") != "[REDACTED]" {
+		t.Fatal("redaction marker is not a valid URL query value")
+	}
+	for _, value := range []string{
+		link,
+		"https://pay.example/?access_token=keep&token_count=2",
+		"https://pay.example/?order_id=order%2f123",
+		"ordinary text pro_access_token=keep",
+		"{invalid json}",
+	} {
+		if got := redactLogValue(value, "", nil); got != value {
+			t.Fatalf("default log changed: %v", got)
+		}
+		if !strings.Contains(value, "secret-one") && redactLogValue(value, "", fields) != value {
+			t.Fatalf("unselected value changed: %q", value)
+		}
+	}
+	logger := &testLogger{}
+	client := &Client{logHook: logger.hook, logRedactFields: fields}
+	encoded, err := json.Marshal(map[string]any{"url": link, "nested": []any{link}, "data": `{"url":"` + link + `"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.logPayload(context.Background(), "response", "/api/buyPay.do", 200, encoded)
+	entry, err := json.Marshal(logger.snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(entry), "secret-one") || strings.Contains(string(entry), "secret-two") || !strings.Contains(string(entry), "keep+value") {
+		t.Fatalf("incorrect nested URL redaction: %s", entry)
+	}
+}
+
+func TestURLLoggingPreservesResponse(t *testing.T) {
+	link := "https://pay.example/?pro_access_token=response-secret&order_id=order-123"
+	body := `{"result_code":"fail","url":"` + link + `","device_name":"null"}`
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+	client, err := NewClient(Config{BaseURL: srv.URL, ProgramID: "app", ShopID: "shop", Key: "key", HTTPClient: srv.Client(), LogRedactFields: []string{"pro_access_token"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := &testLogger{}
+	client = client.WithLogHook(logger.hook)
+	result, err := client.QueryOrder(context.Background(), QueryOrderRequest{OrderID: "order-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ResultCode != "fail" || result.URL != link || result.Raw.String("device_name") != "null" {
+		t.Fatalf("logging changed response: %+v", result)
+	}
+	entries := logger.snapshot()
+	payload := entries[1].Payload.(map[string]any)
+	if payload["url"] == link || strings.Contains(payload["url"].(string), "response-secret") {
+		t.Fatalf("configured URL query parameter not redacted: %v", payload)
+	}
+	// A hook is allowed to retain or modify its payload; it must not own Raw.
+	payload["url"] = "changed by hook"
+	if result.Raw.String("url") != link {
+		t.Fatal("hook payload aliases response fields")
 	}
 }

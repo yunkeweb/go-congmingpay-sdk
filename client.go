@@ -35,6 +35,7 @@ type Config struct {
 	HTTPClient *http.Client
 	// LogRedactFields contains payload field names whose values are replaced
 	// with [REDACTED] in logs. Matching ignores case, underscores, and hyphens.
+	// The same rule applies to query parameter names in HTTP(S) URL strings.
 	// By default, no payload fields are redacted.
 	LogRedactFields []string
 }
@@ -131,15 +132,22 @@ func (c *Client) Do(ctx context.Context, path string, params Params) (Response, 
 	}
 	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		if c.logHook != nil {
-			b, readErr := io.ReadAll(io.LimitReader(res.Body, maxResponseSize+1))
-			if readErr == nil && len(b) <= maxResponseSize {
-				c.logPayload(ctx, "response", p.Path, res.StatusCode, b)
-			} else {
-				c.logFailure(ctx, p.Path, "read HTTP error response failed or too large")
-			}
+		b, readErr := io.ReadAll(io.LimitReader(res.Body, maxResponseSize+1))
+		truncated := len(b) > maxResponseSize
+		if truncated {
+			b = b[:maxResponseSize]
 		}
-		return nil, &HTTPError{StatusCode: res.StatusCode}
+		// Log before exposing the diagnostic bytes, using an independent payload.
+		if readErr == nil && !truncated {
+			c.logPayload(ctx, "response", p.Path, res.StatusCode, b)
+		} else {
+			c.logFailure(ctx, p.Path, "read HTTP error response failed or too large")
+		}
+		return nil, &HTTPError{
+			StatusCode: res.StatusCode, Path: p.Path, Body: b,
+			BodyTruncated: truncated, RequestID: res.Header.Get("X-Request-ID"),
+			RetryAfter: res.Header.Get("Retry-After"), Cause: readErr,
+		}
 	}
 	b, err := io.ReadAll(io.LimitReader(res.Body, maxResponseSize+1))
 	if err != nil {
@@ -161,7 +169,29 @@ func (c *Client) Do(ctx context.Context, path string, params Params) (Response, 
 	return result, nil
 }
 
-// HTTPError reports a non-2xx status without exposing potentially sensitive body data.
-type HTTPError struct{ StatusCode int }
+// HTTPError reports a non-2xx status. Error omits the body and diagnostic headers;
+// callers can explicitly inspect Body, which may contain sensitive data.
+type HTTPError struct {
+	StatusCode int
+	Path       string
+	// Body contains at most 4 MiB of the original response, even with logging disabled.
+	Body []byte
+	// BodyTruncated indicates the size limit was exceeded, not a read failure.
+	BodyTruncated bool
+	// RequestID is the X-Request-ID header, if present.
+	RequestID string
+	// RetryAfter is the unparsed Retry-After header. The SDK does not retry.
+	RetryAfter string
+	// Cause is a response body read error, if any. Body may contain partial data.
+	Cause error
+}
 
-func (e *HTTPError) Error() string { return fmt.Sprintf("congmingpay: HTTP status %d", e.StatusCode) }
+func (e *HTTPError) Error() string {
+	if e.Path == "" {
+		return fmt.Sprintf("congmingpay: HTTP status %d", e.StatusCode)
+	}
+	return fmt.Sprintf("congmingpay: HTTP status %d for %s", e.StatusCode, e.Path)
+}
+
+// Unwrap preserves errors.Is and errors.As for response body read errors.
+func (e *HTTPError) Unwrap() error { return e.Cause }

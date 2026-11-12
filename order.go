@@ -3,6 +3,7 @@ package congmingpay
 import "context"
 
 type QueryOrderRequest struct {
+	// OrderID is the merchant order number sent as order_id for this endpoint.
 	OrderID       string `json:"order_id,omitempty"`
 	OutTradeNo    string `json:"out_trade_no,omitempty"`
 	TransactionID string `json:"transaction_id,omitempty"`

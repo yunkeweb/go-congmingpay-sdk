@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 )
 
@@ -101,10 +102,37 @@ func redactLogValue(value any, key string, fields map[string]struct{}) any {
 				}
 			}
 		}
-		return v
+		return redactLogURL(v, fields)
 	default:
 		return value
 	}
+}
+
+// redactLogURL replaces only configured query values in complete HTTP(S) URLs.
+// Work on RawQuery so unselected values, ordering and encoding stay unchanged.
+func redactLogURL(value string, fields map[string]struct{}) string {
+	u, err := url.Parse(value)
+	if err != nil || u.Host == "" || (!strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https")) || u.RawQuery == "" {
+		return value
+	}
+	parts := strings.Split(u.RawQuery, "&")
+	changed := false
+	for i, part := range parts {
+		key, _, _ := strings.Cut(part, "=")
+		name, err := url.QueryUnescape(key)
+		if err != nil || normalizeLogField(name) == "" {
+			continue
+		}
+		if _, redact := fields[normalizeLogField(name)]; redact {
+			parts[i] = key + "=" + url.QueryEscape("[REDACTED]")
+			changed = true
+		}
+	}
+	if !changed {
+		return value
+	}
+	u.RawQuery = strings.Join(parts, "&")
+	return u.String()
 }
 
 func isJSONContainer(value any) bool {

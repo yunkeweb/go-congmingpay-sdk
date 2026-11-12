@@ -1,9 +1,15 @@
 package congmingpay
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+)
 
 // Response preserves all response fields, including newly added fields and their
-// original JSON representation. A nil error does not imply result_code=success.
+// original field-level JSON representation. It does not preserve the complete
+// HTTP body layout or duplicate keys. A nil error does not imply result_code=success.
 type Response map[string]json.RawMessage
 
 // String returns a string field, or an empty string if it is absent or not a string.
@@ -11,6 +17,70 @@ func (r Response) String(key string) string {
 	var s string
 	_ = json.Unmarshal(r[key], &s)
 	return s
+}
+
+// Decode decodes the response into dst using json.Unmarshal semantics. A nil
+// response is an error. dst must be a non-nil pointer and may be partially filled
+// on error. Interface values use float64 for numbers; use json.Number or
+// json.RawMessage fields when exact numeric values are required.
+// Decode neither changes r nor validates required fields or business statuses.
+func (r Response) Decode(dst any) error {
+	if r == nil {
+		return errors.New("congmingpay: decode nil response")
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		return fmt.Errorf("congmingpay: encode response fields: %w", err)
+	}
+	if err := json.Unmarshal(b, dst); err != nil {
+		return fmt.Errorf("congmingpay: decode response fields: %w", err)
+	}
+	return nil
+}
+
+// StringField distinguishes missing fields, empty strings and type errors.
+// Null and non-string values return a FieldTypeError with present=true.
+// The string "null" is returned unchanged. Invalid JSON returns a wrapped error.
+func (r Response) StringField(key string) (value string, present bool, err error) {
+	raw, present := r[key]
+	if !present {
+		return "", false, nil
+	}
+	var checked json.RawMessage
+	if err := json.Unmarshal(raw, &checked); err != nil {
+		return "", true, fmt.Errorf("congmingpay: decode field %q: %w", key, err)
+	}
+	checked = bytes.TrimSpace(checked)
+	var got string
+	switch checked[0] {
+	case '"':
+		if err := json.Unmarshal(checked, &value); err != nil {
+			return "", true, fmt.Errorf("congmingpay: decode field %q: %w", key, err)
+		}
+		return value, true, nil
+	case 'n':
+		got = "null"
+	case 't', 'f':
+		got = "boolean"
+	case '[':
+		got = "array"
+	case '{':
+		got = "object"
+	default:
+		got = "number"
+	}
+	return "", true, &FieldTypeError{Field: key, Want: "string", Got: got}
+}
+
+// FieldTypeError describes a field type mismatch without including its value.
+type FieldTypeError struct {
+	Field string
+	Want  string
+	Got   string
+}
+
+func (e *FieldTypeError) Error() string {
+	return fmt.Sprintf("congmingpay: field %q: want %s, got %s", e.Field, e.Want, e.Got)
 }
 
 // Result exposes common response fields and preserves the full response in Raw.

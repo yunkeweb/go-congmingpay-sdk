@@ -40,7 +40,58 @@ log.Printf("result=%s status=%s", result.ResultCode, result.OrderStatus)
 
 每个类型化方法返回 `Result`。常用字段可直接读取，`Result.Raw` 保留完整 JSON 响应字段；使用 `json.Unmarshal(result.Raw["字段名"], &value)` 可解析其他字段。`error == nil` 只表示 HTTP 和 JSON 处理成功，不能说明交易成功；必须检查业务状态。请求超时不代表交易未发生，重试支付、退款前应先查询，避免重复操作。
 
+订单标识的参数名随接口而异：下单和 `QueryOrderRequest.OrderID` 的 `order_id` 传商户订单号，退款按商户订单号定位时使用 `RefundRequest.ShopOrderID` 的 `shop_order_id`。不要仅因字段都叫 `OrderID` 就跨接口互换。`RefundOrderID` 是调用方传入的退款单号，用于后续 `QueryRefundRequest.RefundOrderID`；平台退款单号对应 `PlatformRefundOrderID` / `plat_refund_order_id`。这些字段映射不代表平台承诺了幂等，其他订单号和通道流水号仍按对应接口文档传入。
+
 未封装接口可用 `Do(ctx, "/api/custom.do", congmingpay.Params{...})`，返回原始 `Response`。路径必须是 `/api/` 下的相对路径。参数中顶层 `nil` 不发送；涉及嵌套对象的签名需要与平台联调确认。若字段在文档中是 JSON 字符串，应传入字符串，而不是数组或对象。
+
+类型化入口检查已封装的必填字段、至少一项及部分依赖条件；`Do` 只检查通用路径、商户字段和序列化约束，不执行各接口的专属校验。SDK 不自行限制未确认的金额格式、枚举或回调 URL，不修改订单号或金额。
+
+## 读取响应和诊断错误
+
+`Response.String` 和 `Result` 的快捷字符串字段保持原有行为：缺失、JSON null 或非字符串时返回空字符串。需要明确区分时使用 `StringField`：
+
+```go
+device, present, err := result.Raw.StringField("device_name")
+if err != nil {
+    // 可通过 errors.As(err, &fieldTypeErr) 读取 *congmingpay.FieldTypeError。
+    return err
+}
+if present {
+    log.Printf("device=%q", device)
+}
+```
+
+缺失返回 `"", false, nil`，空字符串返回 `"", true, nil`；JSON null、数字、布尔值、数组或对象返回 `*FieldTypeError`。平台字符串 `"null"` 按原值返回。未知业务状态不被解释成成功或失败。
+
+使用 `Raw.Decode` 可一次读取自己需要的字段，无须 SDK 为每个端点维护另一套响应结构。尚未确认类型的字段可以保留为 `json.RawMessage`：
+
+```go
+var fields struct {
+    OrderKey  json.RawMessage `json:"order_key"`
+    AppIDList json.RawMessage `json:"appid_list"`
+    AuthList  json.RawMessage `json:"auth_list"`
+    RefundMsg json.RawMessage `json:"refund_msg"`
+}
+if err := result.Raw.Decode(&fields); err != nil {
+    return err
+}
+```
+
+`Decode` 遵循 `json.Unmarshal` 语义：目标必须是非 nil 指针，未知字段被忽略，不检查必填，不自动转换字符串数字。nil `Response` 返回错误；解码失败可能已填入部分目标字段，建议使用新的局部变量。目标含 `any` 时数字默认解析为 `float64`，需要精确保留时使用 `json.Number`、`json.RawMessage` 或自行使用 `Decoder.UseNumber`。`Raw` 不变，但它是字段级 JSON 数据，不保留完整 HTTP 正文的空白、键顺序和重复键。
+
+非 2xx 返回 `*HTTPError`，即使关闭日志也可取得状态码、接口路径、最多 4 MiB 的原始正文、`X-Request-ID` 和原文 `Retry-After`：
+
+```go
+var httpErr *congmingpay.HTTPError
+if errors.As(err, &httpErr) {
+    log.Printf("HTTP status=%d path=%s request_id=%s body_bytes=%d truncated=%t",
+        httpErr.StatusCode, httpErr.Path, httpErr.RequestID,
+        len(httpErr.Body), httpErr.BodyTruncated)
+    // httpErr.Body 是原始正文，由调用方决定如何脱敏、记录或展示。
+}
+```
+
+`BodyTruncated` 仅表示正文超过大小上限；读取中途失败时保留部分正文，`Cause` 和 `Unwrap()` 保留错误链，支持 `errors.Is(err, context.Canceled)` 等检查。`Error()` 只输出状态码和路径，不自动输出正文、诊断头或底层错误文本。响应头存在时才填入诊断字段；SDK 不因 `Retry-After` 自动重试。HTTP 200 的业务 `fail` 仍返回 `Result` 和 nil error。
 
 ## 回调和签名
 
@@ -52,9 +103,11 @@ log.Printf("result=%s status=%s", result.ResultCode, result.OrderStatus)
 
 ## 日志
 
-默认使用 `fmt.Printf` 输出请求、响应和错误，Payload 字段默认全部显示。使用者可通过 `Config.LogRedactFields` 指定需要遮蔽的字段名；匹配不区分大小写，并忽略字段名中的下划线和连字符，例如配置 `sub_openid` 会匹配 `subOpenid`。规则同样应用于嵌套对象和 JSON 字符串。非 JSON 内容原样记录。`client.WithLogHook(hook)` 返回一个使用自定义钩子的客户端副本；传入 `nil` 关闭日志。钩子同步调用，必须支持并发且不应阻塞。日志不包含回调验签。
+默认使用 `fmt.Printf` 输出请求、响应和错误，Payload 字段默认全部显示。使用者可通过 `Config.LogRedactFields` 指定需要遮蔽的字段名；匹配不区分大小写，并忽略字段名中的下划线和连字符，例如配置 `sub_openid` 会匹配 `subOpenid`。规则同样应用于嵌套对象、JSON 字符串以及其中完整 HTTP(S) URL 的查询参数。非 JSON 内容原样记录。`client.WithLogHook(hook)` 返回一个使用自定义钩子的客户端副本；传入 `nil` 关闭日志。钩子同步调用，必须支持并发且不应阻塞。日志不包含回调验签。
 
-例如在创建客户端时设置 `LogRedactFields: []string{"sign", "sub_openid"}`，仅匹配这两个字段名及上述写法变体，将其值替换为 `[REDACTED]`；`unionid` 等未配置字段继续显示。配置 `token` 不会匹配 `access_token` 或 `token_count`，需要分别列出。未设置或设置为空列表时不脱敏。规则仅处理 JSON 字段，不匹配非 JSON 文本中的内容。
+例如在创建客户端时设置 `LogRedactFields: []string{"sign", "sub_openid"}`，仅匹配这两个字段名及上述写法变体，将其值替换为 `[REDACTED]`；`unionid` 等未配置字段继续显示。配置 `token` 不会匹配 `access_token` 或 `token_count`，需要分别列出。配置 `pro_access_token` 时，JSON 中 `https://pay.example/?pro_access_token=secret&order_id=123` 的日志值会变成 `https://pay.example/?pro_access_token=%5BREDACTED%5D&order_id=123`；实际返回的 URL 不变。URL 参数名经过 URL 解码后匹配，同名重复参数都会处理，未匹配参数的值和编码保留。
+
+未设置或设置为空列表时不脱敏。SDK 不内置敏感字段名单，不默认遮蔽整个 URL，也不扫描自由文本、HTML、URL 路径、userinfo 或 fragment。无法解析为完整 HTTP(S) URL 的字符串原样保留。需要处理这些内容时，在自定义 Hook 中决定如何记录；也可将 `url` 等整个 JSON 字段加入配置。
 
 ## 项目结构
 
@@ -74,7 +127,7 @@ SDK 保持单一 `congmingpay` 包，按职责拆分文件。业务文件中将�
 | `notification.go`、`sign.go` | 回调解析、验签与请求签名 |
 | `logging.go` | 日志钩子与可配置脱敏 |
 
-测试按客户端、请求、签名、回调与日志职责放在对应的 `*_test.go` 文件中；GitHub Actions 工作流放在 `.github/workflows/`。
+测试按客户端、HTTP 错误、请求、响应、签名、回调与日志职责放在对应的 `*_test.go` 文件中；GitHub Actions 工作流放在 `.github/workflows/`。
 
 ## 测试与发布
 
@@ -84,4 +137,6 @@ go test -race ./...
 go vet ./...
 ```
 
-GitHub Actions 执行格式、测试和构建检查，并支持通过版本标签创建 Release。已发布的标签不应修改。当前模块路径支持 v0 和 v1；发布 v2 需要调整模块路径。本次配置和类型化 API 是不兼容变更，升级时需调整调用代码。
+GitHub Actions 执行格式、测试和构建检查，并支持通过版本标签创建 Release。已发布的标签不应修改。当前模块路径支持 v0 和 v1；发布 v2 需要调整模块路径。各版本的兼容性变化见 [更新日志](CHANGELOG.md)。
+
+本地 HTTP/TLS 模拟测试用于验证 SDK 协议行为，不代表全部端点已完成真实支付、退款、分账及回调闭环。2026-11-12 的审查取舍见 [审查记录](docs/audit-review.md)。
