@@ -1,11 +1,11 @@
-# go-congmingpay-sdk
+# congmingpay-go-sdk
 
 聪明付基础支付 API 的 Go SDK，基于飞书文档 revision 3121 和 PHP SDK 的实现。仅依赖 Go 标准库，需要 Go 1.22 或更高版本。
 
 ## 安装
 
 ```sh
-go get github.com/yunkeweb/go-congmingpay-sdk
+go get github.com/yunkeweb/congmingpay-go-sdk
 ```
 
 ## 客户端
