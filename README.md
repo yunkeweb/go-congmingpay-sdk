@@ -1,6 +1,6 @@
 # congmingpay-go-sdk
 
-聪明付基础支付 API 的 Go SDK，基于飞书文档 revision 3121 和 PHP SDK 的实现。仅依赖 Go 标准库，需要 Go 1.22 或更高版本。
+聪明付基础支付 API 的 Go SDK。仅依赖 Go 标准库，需要 Go 1.22 或更高版本。
 
 ## 安装
 
@@ -36,7 +36,7 @@ log.Printf("result=%s status=%s", result.ResultCode, result.OrderStatus)
 
 接口方法包括 `BuyPay`、`JSNativePay`、`MicroPay`、`PrePay`、`MiniAppPay`、`QueryOrder`、`Refund`、`QueryRefund`、`CancelOrder`、`ProfitOrder`、`ProfitOrderBack`、`SearchMerchantWXApp`、`SetMerchantWXApp`、`OpenIDByAuthCode`、`UserCancelOrder` 和 `UnionOpenID`。方法的请求结构体以方法名加 `Request` 命名。
 
-`BuyPayRequest`、`JSNativePayRequest`、`MicroPayRequest` 和 `MiniAppPayRequest` 通过嵌入的 `PaymentFields` 设置共同字段。金额通常使用字符串，单位和精度遵循对应接口；分账回退的 JSON 数值使用 `json.Number` 保留原始十进制表示。指定版本的接口自动填充 `3.0`；查询接口的可选 `Ver` 仅在显式指定时发送。支付接口的分账及回调格式默认值与 PHP SDK 一致，可通过请求字段覆盖。
+`BuyPayRequest`、`JSNativePayRequest`、`MicroPayRequest` 和 `MiniAppPayRequest` 通过嵌入的 `PaymentFields` 设置共同字段。金额通常使用字符串，单位和精度遵循对应接口；分账回退的 JSON 数值使用 `json.Number` 保留原始十进制表示。指定版本的接口自动填充 `3.0`；查询接口的可选 `Ver` 仅在显式指定时发送。支付接口的分账及回调格式有默认值，可通过请求字段覆盖。
 
 每个类型化方法返回 `Result`。常用字段可直接读取，`Result.Raw` 保留完整 JSON 响应字段；使用 `json.Unmarshal(result.Raw["字段名"], &value)` 可解析其他字段。`error == nil` 只表示 HTTP 和 JSON 处理成功，不能说明交易成功；必须检查业务状态。请求超时不代表交易未发生，重试支付、退款前应先查询，避免重复操作。
 
@@ -95,9 +95,9 @@ if errors.As(err, &httpErr) {
 
 ## 回调和签名
 
-请求签名参考 PHP SDK：排除 `sign` 和顶层 null，按字段名排序后拼接并使用大写 MD5。对于嵌套对象，签名与发送的 JSON 字节保持一致；跨语言的对象字段顺序、数字格式等仍需通过平台样例核对。
+请求签名排除 `sign` 和顶层 null，按字段名排序后拼接并使用大写 MD5。对于嵌套对象，签名与发送的 JSON 字节保持一致。
 
-`ParsePaymentNotification` 和 `ParseRefundNotification` 接收 `url.Values`；`ParsePaymentNotificationJSON` 接收 JSON 原文。它们返回的 `Callback` 中 `Money`、`OrderID`、`ResultCode`、`ShopID` 是参与验签的字段，`Raw` 中其他字段并未经过认证。支付回调优先验证 `orderId`，不存在时按 PHP 实现验证 `order_id`；退款回调使用 `shop_id`。实际新回调格式须与平台确认并联调。解析 JSON 前调用方应限制请求体大小。
+`ParsePaymentNotification` 和 `ParseRefundNotification` 接收 `url.Values`；`ParsePaymentNotificationJSON` 接收 JSON 原文。它们返回的 `Callback` 中 `Money`、`OrderID`、`ResultCode`、`ShopID` 是参与验签的字段，`Raw` 中其他字段并未经过认证。支付回调优先验证 `orderId`，不存在时使用 `order_id`；退款回调使用 `shop_id`。解析 JSON 前调用方应限制请求体大小。
 
 验签后仍要核对商户、订单、金额和状态，并进行幂等处理及必要的订单查询。响应签名和分账回退回调的签名规则尚不明确，SDK 不声称已验证。退款回调响应格式也须与平台确认。
 
@@ -108,35 +108,3 @@ if errors.As(err, &httpErr) {
 例如在创建客户端时设置 `LogRedactFields: []string{"sign", "sub_openid"}`，仅匹配这两个字段名及上述写法变体，将其值替换为 `[REDACTED]`；`unionid` 等未配置字段继续显示。配置 `token` 不会匹配 `access_token` 或 `token_count`，需要分别列出。配置 `pro_access_token` 时，JSON 中 `https://pay.example/?pro_access_token=secret&order_id=123` 的日志值会变成 `https://pay.example/?pro_access_token=%5BREDACTED%5D&order_id=123`；实际返回的 URL 不变。URL 参数名经过 URL 解码后匹配，同名重复参数都会处理，未匹配参数的值和编码保留。
 
 未设置或设置为空列表时不脱敏。SDK 不内置敏感字段名单，不默认遮蔽整个 URL，也不扫描自由文本、HTML、URL 路径、userinfo 或 fragment。无法解析为完整 HTTP(S) URL 的字符串原样保留。需要处理这些内容时，在自定义 Hook 中决定如何记录；也可将 `url` 等整个 JSON 字段加入配置。
-
-## 项目结构
-
-SDK 保持单一 `congmingpay` 包，按职责拆分文件。业务文件中将请求结构体与对应接口方法放在一起，使用者继续通过模块根路径导入。
-
-| 文件 | 职责 |
-| --- | --- |
-| `client.go` | 商户配置、客户端创建、HTTP 请求与错误处理 |
-| `request.go` | 通用参数、请求转换、默认值与参数校验 |
-| `response.go` | 原始响应、通用结果与字段解析 |
-| `payment.go` | 各类支付接口及其请求结构体 |
-| `order.go` | 订单查询、撤销与取消 |
-| `refund.go` | 退款与退款查询 |
-| `profit.go` | 分账与分账回退 |
-| `merchant.go` | 商户微信应用配置与查询 |
-| `openid.go` | OpenID 获取 |
-| `notification.go`、`sign.go` | 回调解析、验签与请求签名 |
-| `logging.go` | 日志钩子与可配置脱敏 |
-
-测试按客户端、HTTP 错误、请求、响应、签名、回调与日志职责放在对应的 `*_test.go` 文件中；GitHub Actions 工作流放在 `.github/workflows/`。
-
-## 测试与发布
-
-```sh
-go test ./...
-go test -race ./...
-go vet ./...
-```
-
-GitHub Actions 执行格式、测试和构建检查，并支持通过版本标签创建 Release。已发布的标签不应修改。当前模块路径支持 v0 和 v1；发布 v2 需要调整模块路径。各版本的兼容性变化见 [更新日志](CHANGELOG.md)。
-
-本地 HTTP/TLS 模拟测试用于验证 SDK 协议行为，不代表全部端点已完成真实支付、退款、分账及回调闭环。
